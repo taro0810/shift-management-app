@@ -11,10 +11,16 @@ function App() {
   const [currentStaffId, setCurrentStaffId] = useState(null) 
   const [selectedDay, setSelectedDay] = useState(new Date().toISOString().split('T')[0])
 
+  // --- スクロール位置保持用のRef ---
+  const scrollPosRef = useRef({ x: 0, y: 0 })
+  const containerRef = useRef(null)
+
   const nameRef = useRef(null)
   const roleRef = useRef(null)
   const taskRef = useRef(null)
   const newTaskRef = useRef(null) 
+  const defStartRef = useRef(null)
+  const defEndRef = useRef(null)
 
   const timeOptions = [];
   for (let h = 8; h <= 20; h++) {
@@ -50,6 +56,13 @@ function App() {
   };
   const dateRange = generateDateRange(targetYear, targetMonth);
 
+  const calculateHours = (start, end) => {
+    if (!start || !end || start === 'off') return 0;
+    const [h1, m1] = start.split(':').map(Number);
+    const [h2, m2] = end.split(':').map(Number);
+    return (h2 + m2 / 60) - (h1 + m1 / 60);
+  };
+
   const fetchData = async () => {
     const { data: emp } = await supabase.from('employees').select('*').order('created_at')
     setEmployees(emp || [])
@@ -65,25 +78,30 @@ function App() {
 
   useEffect(() => { fetchData() }, [targetYear, targetMonth, selectedDay])
 
-  // ③のための修正：既存データがなくても「新規作成」として確実に保存する
   const handleSaveShift = async (empId, date, start, end, task) => {
+    scrollPosRef.current = {
+      x: containerRef.current?.scrollLeft || 0,
+      y: window.scrollY
+    }
+
     const existing = shifts.find(x => x.employee_id === empId && x.date === date);
-    
-    const start_val = start || existing?.start_time || '09:00';
-    const end_val = end || existing?.end_time || '17:00';
-    // taskが渡されたらそれを使う。渡されない（時間変更時など）は既存のtaskを維持。
-    const task_val = task !== undefined ? task : (existing?.assigned_task || '');
+    const emp = employees.find(e => e.id === empId);
+    const start_val = start || existing?.start_time || emp?.default_start_time || '09:00';
+    const end_val = end || existing?.end_time || emp?.default_end_time || '17:00';
+    const task_val = task !== undefined ? task : (existing?.assigned_task || emp?.base_task || '');
 
     const { error } = await supabase.from('schedules').upsert({ 
-      employee_id: empId, 
-      date: date, 
-      start_time: start_val, 
-      end_time: end_val,
-      assigned_task: task_val,
-      status: 'published' 
+      employee_id: empId, date, start_time: start_val, end_time: end_val,
+      assigned_task: task_val, status: 'published' 
     }, { onConflict: 'employee_id, date' });
 
-    if (!error) await fetchData();
+    if (!error) {
+      await fetchData();
+      setTimeout(() => {
+        if (containerRef.current) containerRef.current.scrollLeft = scrollPosRef.current.x;
+        window.scrollTo(0, scrollPosRef.current.y);
+      }, 0);
+    }
   }
 
   const handleRequestOff = async (empId, date) => {
@@ -97,71 +115,112 @@ function App() {
     fetchData();
   };
 
-  const MonthlyView = () => (
-    <div style={{ overflowX: 'auto' }}>
-      <div style={{ marginBottom: '15px', display: 'flex', gap: '10px', alignItems: 'center' }}>
-        <select value={targetYear} onChange={(e) => setTargetYear(Number(e.target.value))}>
-          {[2025, 2026, 2027].map(y => <option key={y} value={y}>{y}年</option>)}
-        </select>
-        <select value={targetMonth} onChange={(e) => setTargetMonth(Number(e.target.value))}>
-          {Array.from({length: 12}, (_, i) => i + 1).map(m => <option key={m} value={m}>{m}月度</option>)}
-        </select>
-      </div>
-      <table border="1" style={{ borderCollapse: 'collapse', fontSize: '11px', width: '100%', minWidth: '1200px' }}>
-        <thead>
-          <tr style={{ background: '#f8f8f8' }}>
-            <th style={{ position: 'sticky', left: 0, background: '#f8f8f8', padding: '10px', zIndex: 2 }}>氏名</th>
-            {dateRange.map(d => {
-              const dateObj = new Date(d);
-              const dayStr = dateObj.toLocaleDateString('ja-JP', { weekday: 'short' });
-              return (
-                <th key={d} style={{ padding: '5px', minWidth: '85px', color: dayStr === '日' ? 'red' : dayStr === '土' ? 'blue' : '#333' }}>
-                  {dateObj.getMonth() + 1}/{dateObj.getDate()}<br/>({dayStr})
-                </th>
-              )
-            })}
-          </tr>
-        </thead>
-        <tbody>
-          {employees.map(emp => (
-            <tr key={emp.id}>
-              <td style={{ position: 'sticky', left: 0, background: '#fff', fontWeight: 'bold', padding: '10px', zIndex: 1 }}>{emp.name}</td>
+  const MonthlyView = () => {
+    const weeks = [];
+    let currentWeek = [];
+    dateRange.forEach((d, idx) => {
+      const dateObj = new Date(d);
+      if (dateObj.getDay() === 0 && idx !== 0) {
+        weeks.push(currentWeek);
+        currentWeek = [];
+      }
+      currentWeek.push(d);
+      if (idx === dateRange.length - 1) weeks.push(currentWeek);
+    });
+
+    return (
+      <div ref={containerRef} style={{ overflowX: 'auto' }}>
+        <div style={{ marginBottom: '15px', display: 'flex', gap: '10px', alignItems: 'center' }}>
+          <select value={targetYear} onChange={(e) => setTargetYear(Number(e.target.value))}>
+            {[2025, 2026, 2027].map(y => <option key={y} value={y}>{y}年</option>)}
+          </select>
+          <select value={targetMonth} onChange={(e) => setTargetMonth(Number(e.target.value))}>
+            {Array.from({length: 12}, (_, i) => i + 1).map(m => <option key={m} value={m}>{m}月度</option>)}
+          </select>
+        </div>
+        <table border="1" style={{ borderCollapse: 'collapse', fontSize: '11px', width: '100%', minWidth: '1400px' }}>
+          <thead>
+            <tr style={{ background: '#f8f8f8' }}>
+              <th style={{ position: 'sticky', left: 0, background: '#f8f8f8', padding: '10px', zIndex: 3, minWidth: '80px' }}>氏名</th>
               {dateRange.map(d => {
-                const s = shifts.find(x => x.employee_id === emp.id && x.date === d);
-                const r = requests.find(x => x.employee_id === emp.id && x.date === d);
+                const dateObj = new Date(d);
+                const dayStr = dateObj.toLocaleDateString('ja-JP', { weekday: 'short' });
                 return (
-                  <td key={d} style={{ backgroundColor: r ? '#ffebee' : 'transparent', textAlign: 'center', padding: '2px' }}>
-                    <select 
-                      style={{ fontSize: '10px', width: '100%', marginBottom: '2px' }} 
-                      value={s?.start_time?.substring(0,5) || 'off'} 
-                      onChange={(e) => e.target.value === 'off' ? supabase.from('schedules').delete().match({ employee_id: emp.id, date: d }).then(()=>fetchData()) : handleSaveShift(emp.id, d, e.target.value, s?.end_time || '17:00')}
-                    >
-                      <option value="off">{r ? '休み希望' : '---'}</option>
-                      {timeOptions.map(t => <option key={t} value={t}>{t}</option>)}
-                    </select>
-                    <select 
-                      style={{ fontSize: '10px', width: '100%' }} 
-                      value={s?.end_time?.substring(0,5) || '17:00'} 
-                      disabled={!s}
-                      onChange={(e) => handleSaveShift(emp.id, d, s?.start_time, e.target.value)}
-                    >
-                      {timeOptions.map(t => <option key={t} value={t}>{t}</option>)}
-                    </select>
-                  </td>
+                  <th key={d} style={{ padding: '5px', minWidth: '85px', color: dayStr === '日' ? 'red' : dayStr === '土' ? 'blue' : '#333' }}>
+                    {dateObj.getMonth() + 1}/{dateObj.getDate()}<br/>({dayStr})
+                  </th>
                 )
               })}
+              <th style={{ background: '#e3f2fd', padding: '10px', minWidth: '60px' }}>月合計</th>
+              {weeks.map((_, i) => (
+                <th key={i} style={{ background: '#f1f8e9', padding: '5px', minWidth: '50px', fontSize: '9px' }}>第{i+1}週</th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
+          </thead>
+          <tbody>
+            {employees.map(emp => {
+              let monthlyTotal = 0;
+              const weeklyTotals = weeks.map(weekDates => {
+                let weekSum = 0;
+                weekDates.forEach(d => {
+                  const s = shifts.find(x => x.employee_id === emp.id && x.date === d);
+                  const r = requests.find(x => x.employee_id === emp.id && x.date === d);
+                  const start = s?.start_time?.substring(0,5) || (r ? 'off' : (emp.default_start_time || 'off'));
+                  const end = s?.end_time?.substring(0,5) || emp.default_end_time || '17:00';
+                  const hours = calculateHours(start, end);
+                  weekSum += hours;
+                  monthlyTotal += hours;
+                });
+                return weekSum;
+              });
+
+              return (
+                <tr key={emp.id}>
+                  <td style={{ position: 'sticky', left: 0, background: '#fff', fontWeight: 'bold', padding: '10px', zIndex: 2 }}>{emp.name}</td>
+                  {dateRange.map(d => {
+                    const s = shifts.find(x => x.employee_id === emp.id && x.date === d);
+                    const r = requests.find(x => x.employee_id === emp.id && x.date === d);
+                    const currentStart = s?.start_time?.substring(0,5) || (r ? 'off' : (emp.default_start_time || 'off'));
+                    const currentEnd = s?.end_time?.substring(0,5) || emp.default_end_time || '17:00';
+                    return (
+                      <td key={d} style={{ backgroundColor: r ? '#ffebee' : 'transparent', textAlign: 'center', padding: '2px' }}>
+                        <select 
+                          style={{ fontSize: '10px', width: '100%', marginBottom: '2px' }} 
+                          value={currentStart} 
+                          onChange={(e) => e.target.value === 'off' ? supabase.from('schedules').delete().match({ employee_id: emp.id, date: d }).then(()=>fetchData()) : handleSaveShift(emp.id, d, e.target.value, currentEnd)}
+                        >
+                          <option value="off">{r ? '休み希望' : '---'}</option>
+                          {timeOptions.map(t => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                        <select 
+                          style={{ fontSize: '10px', width: '100%' }} 
+                          value={currentEnd} 
+                          disabled={currentStart === 'off'}
+                          onChange={(e) => handleSaveShift(emp.id, d, currentStart, e.target.value)}
+                        >
+                          {timeOptions.map(t => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                      </td>
+                    )
+                  })}
+                  <td style={{ background: '#e3f2fd', fontWeight: 'bold', textAlign: 'center' }}>{monthlyTotal}h</td>
+                  {weeklyTotals.map((sum, i) => (
+                    <td key={i} style={{ background: '#f1f8e9', textAlign: 'center', color: sum > 40 ? 'red' : '#333' }}>{sum}h</td>
+                  ))}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
 
   const TaskView = () => (
-    <div style={{ overflowX: 'auto' }}>
+    <div ref={containerRef} style={{ overflowX: 'auto' }}>
       <div style={{ marginBottom: '15px' }}>
         <h3 style={{ margin: 0 }}>③ 勤務一覧表 (役割分担)</h3>
-        <p style={{ fontSize: '12px', color: '#666' }}>役割を選択すると即座に保存されます。</p>
+        <p style={{ fontSize: '12px', color: '#666' }}>※役割の変更は「②日別割当」ページで行ってください（閲覧専用）。</p>
       </div>
       <table border="1" style={{ borderCollapse: 'collapse', fontSize: '12px', width: '100%', minWidth: '1200px' }}>
         <thead>
@@ -185,22 +244,29 @@ function App() {
               {dateRange.map(d => {
                 const s = shifts.find(x => x.employee_id === emp.id && x.date === d);
                 const r = requests.find(x => x.employee_id === emp.id && x.date === d);
+                
+                // 表示する業務名：個別割当があればそれ、なければ従業員の基本業務
+                const displayTask = s?.assigned_task || (r ? "" : emp.base_task) || "";
+
                 return (
-                  <td key={d} style={{ backgroundColor: r ? '#ffebee' : (s ? '#fff9c4' : '#f5f5f5'), padding: '2px', textAlign:'center' }}>
+                  <td key={d} style={{ 
+                    backgroundColor: r ? '#ffebee' : (s ? '#fff9c4' : '#f5f5f5'), 
+                    padding: '2px', 
+                    textAlign:'center' 
+                  }}>
                     <select 
-                      style={{ width: '100%', border: 'none', background: 'transparent', textAlign: 'center', fontSize: '11px', height: '30px', cursor: 'pointer' }}
-                      // 重要：DBの値をそのまま参照し、不一致を防ぐ
-                      value={s?.assigned_task || ''}
-                      onChange={(e) => {
-                        const newTask = e.target.value;
-                        // 現在のシフト時間を保持したまま役割だけを更新。シフトがなければ標準時間で作成。
-                        handleSaveShift(emp.id, d, s?.start_time, s?.end_time, newTask);
+                      style={{ 
+                        width: '100%', border: 'none', background: 'transparent', textAlign: 'center', 
+                        fontSize: '11px', height: '30px', appearance: 'none', color: '#333', fontWeight: 'bold'
                       }}
+                      value={displayTask}
+                      disabled
                     >
-                      <option value="">-</option>
-                      {tasks.map(t => (
-                        <option key={t.id} value={t.name}>{t.name}</option>
-                      ))}
+                      <option value="">{r ? "休み" : "-"}</option>
+                      {tasks.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
+                      {!tasks.find(t => t.name === displayTask) && displayTask && (
+                        <option value={displayTask}>{displayTask}</option>
+                      )}
                     </select>
                   </td>
                 );
@@ -213,7 +279,7 @@ function App() {
   );
 
   const DailyView = () => (
-    <div>
+    <div ref={containerRef}>
       <div style={{ marginBottom: '15px' }}>
         <input type="date" value={selectedDay} onChange={(e) => setSelectedDay(e.target.value)} style={{ padding: '8px' }} />
         <span style={{ marginLeft: '10px', fontWeight: 'bold' }}>{new Date(selectedDay).toLocaleDateString('ja-JP', { weekday: 'long' })}</span>
@@ -223,7 +289,7 @@ function App() {
           <thead>
             <tr style={{ background: '#eee' }}>
               <th style={{ width: '120px', padding: '10px' }}>氏名</th>
-              <th style={{ width: '100px' }}>標準業務</th>
+              <th style={{ width: '120px' }}>標準業務</th>
               {timeOptions.map(t => (
                 <th key={t} style={{ fontSize: '9px', width: '35px' }}>{t.endsWith(':00') ? t.split(':')[0] : ''}</th>
               ))}
@@ -232,25 +298,37 @@ function App() {
           <tbody>
             {employees.map(emp => {
               const s = shifts.find(x => x.employee_id === emp.id && x.date === selectedDay);
+              const r = requests.find(x => x.employee_id === emp.id && x.date === selectedDay);
+              const startTime = s?.start_time?.substring(0,5) || (!r ? emp.default_start_time : null);
+              const endTime = s?.end_time?.substring(0,5) || (!r ? emp.default_end_time : null);
               return (
                 <tr key={emp.id}>
                   <td style={{ padding: '8px', fontWeight: 'bold' }}>{emp.name}</td>
-                  <td style={{ fontSize: '11px' }}>{emp.base_task}</td>
+                  <td style={{ padding: '2px' }}>
+                    <select 
+                      style={{ width: '100%', padding: '5px', fontSize: '11px', border: '1px solid #ddd', borderRadius: '4px' }}
+                      value={s?.assigned_task || emp.base_task || ''}
+                      onChange={(e) => handleSaveShift(emp.id, selectedDay, startTime, endTime, e.target.value)}
+                    >
+                      <option value="">-</option>
+                      {tasks.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
+                    </select>
+                  </td>
                   {timeOptions.map(t => {
-                    const isWorking = s && t >= s.start_time.substring(0,5) && t < s.end_time.substring(0,5);
+                    const isWorking = startTime && endTime && t >= startTime && t < endTime;
                     const isBreak = s?.break_times?.includes(t);
                     return (
                       <td key={t} 
                         onClick={async () => {
                           if(!isWorking) return;
-                          const newBreaks = isBreak ? s.break_times.filter(x => x !== t) : [...(s.break_times||[]), t];
-                          await supabase.from('schedules').update({ break_times: newBreaks }).eq('id', s.id);
+                          const newBreaks = isBreak ? s.break_times.filter(x => x !== t) : [...(s?.break_times||[]), t];
+                          await supabase.from('schedules').upsert({
+                            employee_id: emp.id, date: selectedDay, start_time: startTime, end_time: endTime,
+                            break_times: newBreaks, assigned_task: s?.assigned_task || emp.base_task || '', status: 'published'
+                          }, { onConflict: 'employee_id, date' });
                           fetchData();
                         }}
-                        style={{ 
-                          backgroundColor: isWorking ? (isBreak ? '#fff' : '#fff176') : '#f5f5f5',
-                          height: '40px', textAlign: 'center', cursor: isWorking ? 'pointer' : 'default', fontSize: '12px', fontWeight: 'bold'
-                        }}
+                        style={{ backgroundColor: isWorking ? (isBreak ? '#fff' : '#fff176') : '#f5f5f5', height: '40px', textAlign: 'center', cursor: isWorking ? 'pointer' : 'default', fontSize: '12px', fontWeight: 'bold' }}
                       >
                         {isWorking && !isBreak ? '1' : ''}
                       </td>
@@ -269,7 +347,6 @@ function App() {
     const me = employees.find(e => String(e.id) === String(currentStaffId));
     const closed = isDeadlinePassed();
     if (!me) return <div style={{padding: '40px', textAlign: 'center'}}>読み込み中...</div>;
-
     return (
       <div style={{ maxWidth: '600px', margin: '0 auto' }}>
         <div style={{ background: '#333', color: 'white', padding: '20px', borderRadius: '12px', marginBottom: '20px' }}>
@@ -290,7 +367,9 @@ function App() {
                   <div style={{ fontSize: '18px', fontWeight: 'bold', color: s ? '#007AFF' : '#555' }}>
                     {s ? `${s.start_time.substring(0,5)} 〜 ${s.end_time.substring(0,5)}` : (r ? '休み希望中' : '休み')}
                   </div>
-                  {s?.assigned_task && <div style={{marginTop: '5px', color: '#d32f2f', fontWeight: 'bold', fontSize: '14px'}}>担当：{s.assigned_task}</div>}
+                  <div style={{marginTop: '5px', color: '#d32f2f', fontWeight: 'bold', fontSize: '14px'}}>
+                    担当：{s?.assigned_task || me.base_task || '未設定'}
+                  </div>
                 </div>
                 {!closed && (
                   <button onClick={() => handleRequestOff(me.id, d)} style={{ padding: '10px 15px', borderRadius: '8px', border: 'none', background: r ? '#ff4444' : '#eee', color: r ? '#fff' : '#333', fontWeight: 'bold', cursor: 'pointer' }}>
@@ -334,18 +413,30 @@ function App() {
             {view === 'employee' && (
               <div>
                 <h3 style={{marginTop:0}}>従業員管理</h3>
-                <div style={{ display: 'flex', gap: '10px', marginBottom: '30px', background:'#f9f9f9', padding:'15px', borderRadius:'8px' }}>
-                  <input ref={nameRef} placeholder="名前" style={{ padding: '10px' }} />
-                  <input ref={roleRef} placeholder="役職" style={{ padding: '10px' }} />
-                  <input ref={taskRef} placeholder="標準業務" style={{ padding: '10px' }} />
-                  <button onClick={async () => {
-                    if(!nameRef.current.value) return;
-                    await supabase.from('employees').insert([{ name: nameRef.current.value, role: roleRef.current.value, base_task: taskRef.current.value }]);
-                    fetchData();
-                    nameRef.current.value=""; roleRef.current.value=""; taskRef.current.value="";
-                  }} style={{ padding: '10px 20px', background: '#4CAF50', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>追加</button>
+                <div style={{ background:'#f9f9f9', padding:'20px', borderRadius:'8px', marginBottom: '30px' }}>
+                  <p style={{fontSize:'12px', color:'#666', marginTop:0}}>新しい従業員を追加</p>
+                  <div style={{ display: 'flex', gap: '10px', flexWrap:'wrap' }}>
+                    <input ref={nameRef} placeholder="名前" style={{ padding: '10px' }} />
+                    <input ref={roleRef} placeholder="役職" style={{ padding: '10px' }} />
+                    <input ref={taskRef} placeholder="標準業務" style={{ padding: '10px' }} />
+                    <div style={{display:'flex', alignItems:'center', gap:'5px', fontSize:'12px'}}>
+                      基本:
+                      <select ref={defStartRef} style={{padding:'8px'}} defaultValue="09:00">
+                        {timeOptions.map(t => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                      〜
+                      <select ref={defEndRef} style={{padding:'8px'}} defaultValue="17:00">
+                        {timeOptions.map(t => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </div>
+                    <button onClick={async () => {
+                      if(!nameRef.current.value) return;
+                      await supabase.from('employees').insert([{ name: nameRef.current.value, role: roleRef.current.value, base_task: taskRef.current.value, default_start_time: defStartRef.current.value, default_end_time: defEndRef.current.value }]);
+                      fetchData();
+                      nameRef.current.value=""; roleRef.current.value=""; taskRef.current.value="";
+                    }} style={{ padding: '10px 20px', background: '#4CAF50', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>追加</button>
+                  </div>
                 </div>
-
                 <h3>役割（タスク）マスター管理</h3>
                 <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', background:'#f9f9f9', padding:'15px', borderRadius:'8px' }}>
                   <input ref={newTaskRef} placeholder="新しい役割名 (例: レジ)" style={{ padding: '10px' }} />
@@ -364,13 +455,17 @@ function App() {
                     </div>
                   ))}
                 </div>
-
                 <h3>登録済み従業員一覧</h3>
                 <table border="1" style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <thead><tr style={{background:'#eee'}}><th style={{padding:'10px'}}>名前</th><th>役職</th><th>標準業務</th><th>操作</th></tr></thead>
+                  <thead>
+                    <tr style={{background:'#eee'}}><th style={{padding:'10px'}}>名前</th><th>役職</th><th>標準業務</th><th>基本勤務時間</th><th>操作</th></tr>
+                  </thead>
                   <tbody>
                     {employees.map(emp => (
-                      <tr key={emp.id} style={{textAlign:'center'}}><td style={{padding:'10px'}}>{emp.name}</td><td>{emp.role}</td><td>{emp.base_task}</td><td><button onClick={async() => {if(confirm("削除しますか？")){await supabase.from('employees').delete().eq('id', emp.id); fetchData();}}} style={{color:'red', cursor:'pointer', border:'none', background:'none'}}>削除</button></td></tr>
+                      <tr key={emp.id} style={{textAlign:'center'}}>
+                        <td style={{padding:'10px'}}>{emp.name}</td><td>{emp.role}</td><td>{emp.base_task}</td><td style={{fontSize:'12px'}}>{emp.default_start_time} 〜 {emp.default_end_time}</td>
+                        <td><button onClick={async() => {if(confirm("削除しますか？")){await supabase.from('employees').delete().eq('id', emp.id); fetchData();}}} style={{color:'red', cursor:'pointer', border:'none', background:'none'}}>削除</button></td>
+                      </tr>
                     ))}
                   </tbody>
                 </table>
